@@ -19,6 +19,8 @@ export interface ProgramDeps {
     hwaccel?(): boolean;
 }
 
+/** decoders on the GPU too when Hardware acceleration is on (off: measured no gain, see startDecoder) */
+const DECODE_ON_GPU = false;
 /** time allowed for a decoder's first frame, and longest silence of a running one */
 const FIRST_FRAME_MS = 15000;
 const STALL_MS = 10000;
@@ -216,7 +218,7 @@ export class Program {
     /** what the encoder and the decoders use now, for the status */
     get acceleration() {
         if (!this.hwWanted()) return 'software';
-        return `GPU (VAAPI): encode ${this.hwEncodeFailed ? 'failed, software' : 'on'}, decode ${this.hwDecodeFailed ? 'failed, software' : 'on'}`;
+        return `GPU (VAAPI) encode${this.hwEncodeFailed ? ' failed, software' : ''}, ${DECODE_ON_GPU && !this.hwDecodeFailed ? 'GPU' : 'software'} decode`;
     }
 
     private async startEncoder() {
@@ -294,7 +296,9 @@ export class Program {
         (async () => {
             const [ffmpeg, input, label] = await Promise.all([this.deps.ffmpegPath(), this.deps.input(camera), this.deps.label(camera)]);
             if (d.stopped) return;
-            const hw = this.hwWanted() && !this.hwDecodeFailed;
+            // GPU decode measured on an Intel HD 530 (2026-11-20): no CPU saved (the CPU still scales, plus the copy back from the GPU),
+            // only GPU load next to other VAAPI users. The setting therefore moves the ENCODER only; decoderArgs keeps the option.
+            const hw = this.hwWanted() && !this.hwDecodeFailed && DECODE_ON_GPU;
             const proc = spawn(ffmpeg, decoderArgs(input, f, label, hw), { stdio: ['ignore', 'pipe', 'pipe'] });
             d.proc = proc;
             const frames = new FrameAssembler(frameSize(f), frame => {

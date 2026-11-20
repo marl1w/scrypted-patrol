@@ -1,6 +1,6 @@
 {
   "name": "@marl1w/scrypted-patrol",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Scrypted plugin: one virtual camera that patrols a set of cameras in turn and cuts to the one with an event, as a single continuous stream with its own motion, occupancy and sensors.",
   "license": "Apache-2.0",
   "scripts": {
