@@ -115,7 +115,12 @@ export function drawtextCheckArgs(fontFile?: string): string[] {
  * The decoder: the member's stream (its own ffmpeg input arguments, as its VideoCamera handed them out) to raw
  * frames, letterboxed into the output size at the output rate. `labelFile` draws its text top left.
  */
-export function decoderArgs(input: string[], f: OutputFormat, label?: { fontFile?: string; textFile: string }): string[] {
+/** the VAAPI render node (Intel iGPU on the box); the same flags Coral Guard decodes with */
+export const VAAPI_DEVICE = '/dev/dri/renderD128';
+/** stderr of an ffmpeg that failed because of VAAPI: that path falls back to software for good */
+export const HW_ERROR_RE = /vaapi|va_|hwaccel|hwupload|hwdownload|AVHWFramesContext|libva|surface/i;
+
+export function decoderArgs(input: string[], f: OutputFormat, label?: { fontFile?: string; textFile: string }, hw = false): string[] {
     const vf = [
         `fps=${f.fps}`,
         `scale=${f.width}:${f.height}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
@@ -127,6 +132,8 @@ export function decoderArgs(input: string[], f: OutputFormat, label?: { fontFile
     return [
         '-hide_banner', '-loglevel', 'error', '-nostdin',
         '-fflags', '+nobuffer+discardcorrupt',
+        // GPU decode into system memory (nv12): scaling stays on the CPU, the box's iGPU has no VAAPI scaler
+        ...(hw ? ['-hwaccel', 'vaapi', '-hwaccel_device', VAAPI_DEVICE, '-hwaccel_output_format', 'nv12'] : []),
         ...input,
         '-an', '-sn', '-dn',
         '-vf', vf.join(','),
@@ -141,18 +148,25 @@ export function decoderArgs(input: string[], f: OutputFormat, label?: { fontFile
  * serves this stream onwards can copy it instead of encoding it again. x264 also cuts a keyframe on the scene
  * change of a camera switch.
  */
-export function encoderArgs(f: OutputFormat, overlay?: TextOverlay): string[] {
+export function encoderArgs(f: OutputFormat, overlay?: TextOverlay, hw = false): string[] {
     const k = Math.round(f.bitrate);
+    // the countdown: a text file the plugin rewrites (atomically) once a second, re-read on every frame
+    const text = overlay ? [`drawtext=${fontOption(overlay.fontFile)}textfile=${overlay.textFile}:reload=1:expansion=none:fontsize=${Math.max(10, Math.round(f.height / 40))}:fontcolor=white@0.9:box=1:boxcolor=black@0.4:boxborderw=3:x=8:y=h-th-8`] : [];
+    const rate = ['-b:v', `${k}k`, '-maxrate', `${Math.round(k * 1.25)}k`, '-bufsize', `${Math.round(k * 1.25)}k`];
+    // the same stream either way: Main profile, the level, no B-frames, a keyframe every second with SPS/PPS in band
+    // (h264_vaapi writes them before every IDR; each I-frame is an IDR with its default idr_interval 0)
+    const codec = hw
+        ? ['-vf', [...text, 'format=nv12', 'hwupload'].join(','), '-c:v', 'h264_vaapi', '-profile:v', 'main', '-level', h264Level(f),
+            '-bf', '0', '-g', String(f.fps), '-rc_mode', 'VBR', ...rate]
+        : [...(text.length ? ['-vf', text[0]] : []), '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
+            '-profile:v', 'main', '-level:v', h264Level(f), '-pix_fmt', 'yuv420p',
+            '-x264-params', 'repeat-headers=1', '-bf', '0', '-g', String(f.fps), ...rate];
     return [
         '-hide_banner', '-loglevel', 'error', '-nostdin',
+        ...(hw ? ['-vaapi_device', VAAPI_DEVICE] : []),
         '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-video_size', `${f.width}x${f.height}`, '-framerate', String(f.fps),
         '-i', 'pipe:0',
-        // the countdown: a text file the plugin rewrites (atomically) once a second, re-read on every frame
-        ...(overlay ? ['-vf', `drawtext=${fontOption(overlay.fontFile)}textfile=${overlay.textFile}:reload=1:expansion=none:fontsize=${Math.max(10, Math.round(f.height / 40))}:fontcolor=white@0.9:box=1:boxcolor=black@0.4:boxborderw=3:x=8:y=h-th-8`] : []),
-        '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
-        '-profile:v', 'main', '-level:v', h264Level(f), '-pix_fmt', 'yuv420p',
-        '-x264-params', 'repeat-headers=1', '-bf', '0', '-g', String(f.fps),
-        '-b:v', `${k}k`, '-maxrate', `${Math.round(k * 1.25)}k`, '-bufsize', `${Math.round(k * 1.25)}k`,
+        ...codec,
         '-f', 'mpegts', '-flush_packets', '1', 'pipe:1',
     ];
 }

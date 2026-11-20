@@ -112,3 +112,16 @@ test('display names: regex replacement, all matches, never empty, bad patterns i
     assert.equal(patternError('('), 'Invalid regular expression: /(/g: Unterminated group');
     assert.equal(patternError('^villa_\\d+_'), undefined);
 });
+
+test('GPU (VAAPI) arguments: off by default; on, the encoder keeps the HomeKit-safe stream and the decoder only decodes on the GPU', () => {
+    const f = { width: 960, height: 540, fps: 7, bitrate: 1500 } as any;
+    assert.equal(encoderArgs(f).join(' ').includes('vaapi'), false, 'software unless asked');
+    const e = encoderArgs(f, { fontFile: '/f.ttf', textFile: '/tmp/c.txt' }, true).join(' ');
+    assert.match(e, /^-hide_banner .* -vaapi_device \/dev\/dri\/renderD128 -f rawvideo/);
+    assert.match(e, /-vf drawtext=.*,format=nv12,hwupload -c:v h264_vaapi -profile:v main -level 3\.1 -bf 0 -g 7 /);
+    assert.match(e, /-b:v 1500k -maxrate 1875k -bufsize 1875k -f mpegts/);
+    const d = decoderArgs(['-rtsp_transport', 'tcp', '-i', 'rtsp://127.0.0.1:1/x'], f, undefined, true).join(' ');
+    assert.match(d, /-hwaccel vaapi -hwaccel_device \/dev\/dri\/renderD128 -hwaccel_output_format nv12 -rtsp_transport tcp -i /);
+    assert.match(d, /scale=960:540/, 'scaling stays on the CPU (no VAAPI scaler on this iGPU)');
+    assert.equal(decoderArgs(['-i', 'x'], f).join(' ').includes('hwaccel'), false);
+});

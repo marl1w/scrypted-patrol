@@ -59,6 +59,7 @@ export class PatrolCamera extends ScryptedDeviceBase implements VideoCamera, Cam
                 this.console.log(`patrol: on screen: ${camera ? this.nameOf(camera) : 'nothing'}`);
                 this.publish();
             },
+            hwaccel: () => this.storage.getItem('hwaccel') === 'true',
             onFailed: (camera, reason) => {
                 this.lastFailure = `${this.nameOf(camera)}: ${reason}`;
                 this.console.warn(`patrol: ${this.lastFailure}`);
@@ -467,7 +468,8 @@ export class PatrolCamera extends ScryptedDeviceBase implements VideoCamera, Cam
             { group: 'Output', key: 'nameReplace', title: 'Name replacement', value: this.storage.getItem('nameReplace') || '', placeholder: '(empty: remove)', description: 'What each match becomes; $1 and so on refer to groups.' },
             { group: 'Output', key: 'fontFile', title: 'Font file', value: this.fontFile(), placeholder: '/path/to/font.ttf', description: 'For the text on screen; needed when this ffmpeg has no fontconfig. Checked once with a one-frame run: when text does not work it is left out, the stream is unaffected.' },
             { group: 'Status', key: 'status', title: 'On screen', readonly: true, value: status },
-            { group: 'Status', key: 'output', title: 'Output', readonly: true, value: `${this.program.running ? 'encoding' : 'idle'}, ${this.program.viewers} viewer(s)` },
+            { group: 'Output', key: 'hwaccel', title: 'Hardware acceleration', type: 'boolean', value: this.storage.getItem('hwaccel') === 'true', description: 'Encode and decode on the GPU (VAAPI) instead of the CPU. A GPU failure switches that part back to software by itself. Applies from the next camera switch / viewer.' },
+            { group: 'Status', key: 'output', title: 'Output', readonly: true, value: `${this.program.running ? 'encoding' : 'idle'}, ${this.program.viewers} viewer(s), ${this.program.acceleration}` },
             { group: 'Status', key: 'failure', title: 'Last stream failure', readonly: true, value: this.lastFailure || 'none' },
             { group: 'Status', key: 'text', title: 'Text on screen', readonly: true, value: this.textStatus },
         );
@@ -489,7 +491,7 @@ export class PatrolCamera extends ScryptedDeviceBase implements VideoCamera, Cam
             this.storage.setItem(key, String(value ?? ''));
         }
         this.configure();
-        if (['label', 'fontFile', 'destination', 'namePattern', 'nameReplace'].includes(key)) this.program.restartSource();
+        if (['label', 'fontFile', 'destination', 'namePattern', 'nameReplace', 'hwaccel'].includes(key)) this.program.restartSource();
         if (key === 'namePattern' || key === 'nameReplace') this.countdownShown = '';
         this.onDeviceEvent(ScryptedInterface.Settings, undefined);
     }

@@ -2,7 +2,7 @@
 // screen. Node only (child_process, net); the Scrypted side is passed in, so this module has no SDK dependency.
 import { ChildProcess, spawn } from 'node:child_process';
 import net from 'node:net';
-import { blackFrame, decoderArgs, encoderArgs, FrameAssembler, frameSize, OutputFormat, TextOverlay } from './media';
+import { blackFrame, decoderArgs, encoderArgs, FrameAssembler, frameSize, HW_ERROR_RE, OutputFormat, TextOverlay } from './media';
 
 export interface ProgramDeps {
     console: Console;
@@ -15,6 +15,8 @@ export interface ProgramDeps {
     onShowing(camera: string | undefined): void;
     /** a camera's stream did not start or stopped delivering frames */
     onFailed(camera: string, reason: string): void;
+    /** encode and decode on the GPU (VAAPI); a VAAPI failure falls back to software for good */
+    hwaccel?(): boolean;
 }
 
 /** time allowed for a decoder's first frame, and longest silence of a running one */
@@ -207,27 +209,43 @@ export class Program {
         });
     }
 
+    /** VAAPI paths that failed once and run in software from then on */
+    private hwEncodeFailed = false;
+    private hwDecodeFailed = false;
+    private hwWanted() { return !!this.deps.hwaccel?.(); }
+    /** what the encoder and the decoders use now, for the status */
+    get acceleration() {
+        if (!this.hwWanted()) return 'software';
+        return `GPU (VAAPI): encode ${this.hwEncodeFailed ? 'failed, software' : 'on'}, decode ${this.hwDecodeFailed ? 'failed, software' : 'on'}`;
+    }
+
     private async startEncoder() {
         if (this.encoder) return;
         const ffmpeg = await this.deps.ffmpegPath();
         if (this.encoder || !this.clients.size) return;
         const f = this.format;
-        const proc = spawn(ffmpeg, encoderArgs(f, this.overlay), { stdio: ['pipe', 'pipe', 'pipe'] });
+        const hw = this.hwWanted() && !this.hwEncodeFailed;
+        const proc = spawn(ffmpeg, encoderArgs(f, this.overlay, hw), { stdio: ['pipe', 'pipe', 'pipe'] });
         this.encoder = proc;
         this.encoderBusy = false;
-        this.deps.console.log(`patrol: encoder started, ${f.width}x${f.height} @ ${f.fps} fps, ${f.bitrate} kbit/s`);
+        let encErr = '';
+        this.deps.console.log(`patrol: encoder started, ${f.width}x${f.height} @ ${f.fps} fps, ${f.bitrate} kbit/s, ${hw ? 'GPU (VAAPI)' : 'software'}`);
         proc.stdout!.on('data', (chunk: Buffer) => {
             for (const c of this.clients) {
                 if (c.writableLength > MAX_CLIENT_BACKLOG) c.destroy();
                 else c.write(chunk);
             }
         });
-        proc.stderr!.on('data', (d: Buffer) => this.deps.console.warn(`patrol: encoder: ${d.toString().trim()}`));
+        proc.stderr!.on('data', (d: Buffer) => { encErr = (encErr + d.toString()).slice(-500); this.deps.console.warn(`patrol: encoder: ${d.toString().trim()}`); });
         proc.stdin!.on('error', () => { /* exit handled below */ });
         proc.stdin!.on('drain', () => { this.encoderBusy = false; });
         proc.on('exit', (code, signal) => {
             if (this.encoder !== proc) return;
             this.deps.console.warn(`patrol: encoder exited (${signal ?? code})`);
+            if (hw && code && HW_ERROR_RE.test(encErr)) {
+                this.hwEncodeFailed = true;
+                this.deps.console.warn('patrol: GPU encode failed, encoding in software from now on');
+            }
             this.encoder = undefined;
             this.teardown();
             // viewers reconnect and start a fresh encoder
@@ -276,7 +294,8 @@ export class Program {
         (async () => {
             const [ffmpeg, input, label] = await Promise.all([this.deps.ffmpegPath(), this.deps.input(camera), this.deps.label(camera)]);
             if (d.stopped) return;
-            const proc = spawn(ffmpeg, decoderArgs(input, f, label), { stdio: ['ignore', 'pipe', 'pipe'] });
+            const hw = this.hwWanted() && !this.hwDecodeFailed;
+            const proc = spawn(ffmpeg, decoderArgs(input, f, label, hw), { stdio: ['ignore', 'pipe', 'pipe'] });
             d.proc = proc;
             const frames = new FrameAssembler(frameSize(f), frame => {
                 if (d.stopped) return;
@@ -293,6 +312,10 @@ export class Program {
             proc.stderr!.on('data', (b: Buffer) => { err = (err + b.toString()).slice(-500); });
             proc.on('exit', (code, signal) => {
                 if (d.stopped) return;
+                if (hw && code && HW_ERROR_RE.test(err) && !this.hwDecodeFailed) {
+                    this.hwDecodeFailed = true;
+                    this.deps.console.warn('patrol: GPU decode failed, decoding in software from now on');
+                }
                 this.fail(d, `decoder exited (${signal ?? code})${err.trim() ? `: ${err.trim().split('\n').pop()}` : ''}`);
             });
         })().catch(e => { if (!d.stopped) this.fail(d, (e as Error).message); });
